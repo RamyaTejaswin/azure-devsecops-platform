@@ -1,0 +1,54 @@
+replicaCount: 2
+
+image:
+  repository: acrdevopsdev001.azurecr.io/api-gateway
+  pullPolicy: Always
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 10
+  periodSeconds: 15
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+env:
+  - name: APP_ENV
+    value: "dev"
+  - name: AUTH_SERVICE_URL
+    value: "http://auth-service:80"
+  - name: DATA_SERVICE_URL
+    value: "http://data-service:80"
+serviceAccount:
+  create: true
+  name: ""
+ingress:
+  enabled: false
+httpRoute:
+  enabled: false
