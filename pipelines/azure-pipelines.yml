@@ -1,0 +1,222 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - services/**
+      - helm/**
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  - group: devops-project-secrets
+  - name: IMAGE_TAG
+    value: $(Build.BuildId)
+
+stages:
+
+# ─────────────────────────────────────────
+# STAGE 1 — BUILD & PUSH TO ACR
+# ─────────────────────────────────────────
+- stage: Build
+  displayName: 'Build & Push Images'
+  jobs:
+  - job: BuildAndPush
+    displayName: 'Docker Build & Push'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      matrix:
+        api-gateway:
+          SERVICE: api-gateway
+          PORT: 8000
+        auth-service:
+          SERVICE: auth-service
+          PORT: 8001
+        data-service:
+          SERVICE: data-service
+          PORT: 8002
+    steps:
+    - task: Docker@2
+      displayName: 'Build & Push $(SERVICE)'
+      inputs:
+        containerRegistry: 'acr-connection'
+        repository: '$(SERVICE)'
+        command: 'buildAndPush'
+        Dockerfile: 'services/$(SERVICE)/Dockerfile'
+        tags: |
+          $(IMAGE_TAG)
+          latest
+
+# ─────────────────────────────────────────
+# STAGE 2 — SONARQUBE CODE QUALITY SCAN
+# ─────────────────────────────────────────
+- stage: CodeQuality
+  displayName: 'SonarQube Scan'
+  dependsOn: Build
+  jobs:
+  - job: SonarQubeScan
+    displayName: 'SonarQube Analysis'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: SonarQubeAnalyze@5
+      displayName: 'Run SonarQube Analysis'
+      inputs:
+        SonarQube: 'sonarqube-connection'
+        projectKey: '$(SONAR_PROJECT_KEY)'
+        projectName: 'azure-devsecops-platform'
+        extraProperties: |
+          sonar.host.url=$(SONAR_HOST_URL)
+          sonar.login=$(SONAR_TOKEN)
+          sonar.sources=services
+
+# ─────────────────────────────────────────
+# STAGE 3 — TRIVY IMAGE SECURITY SCAN
+# ─────────────────────────────────────────
+- stage: SecurityScan
+  displayName: 'Trivy Image Scan'
+  dependsOn: Build
+  jobs:
+  - job: TrivyScan
+    displayName: 'Trivy Vulnerability Scan'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - script: |
+        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+      displayName: 'Install Trivy'
+
+    - task: AzureCLI@2
+      displayName: 'Login to ACR'
+      inputs:
+        azureSubscription: 'azure-connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az acr login --name $(ACR_NAME)
+
+    - script: |
+        for SERVICE in api-gateway auth-service data-service; do
+          echo "Scanning $SERVICE..."
+          trivy image \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --no-progress \
+            $(ACR_NAME).azurecr.io/$SERVICE:$(IMAGE_TAG)
+        done
+      displayName: 'Scan all images for HIGH/CRITICAL CVEs'
+
+# ─────────────────────────────────────────
+# STAGE 4 — DEPLOY TO STAGING
+# ─────────────────────────────────────────
+- stage: DeployStaging
+  displayName: 'Deploy to Staging'
+  dependsOn:
+    - CodeQuality
+    - SecurityScan
+  condition: succeeded()
+  jobs:
+  - deployment: HelmDeployStaging
+    displayName: 'Helm Deploy → Staging'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'staging'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Get AKS credentials'
+            inputs:
+              azureSubscription: 'azure-connection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(AKS_RESOURCE_GROUP) \
+                  --name $(AKS_CLUSTER) \
+                  --overwrite-existing
+
+          - script: |
+              kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+            displayName: 'Ensure staging namespace exists'
+
+          - script: |
+              for SERVICE in api-gateway auth-service data-service; do
+                helm upgrade --install $SERVICE ./helm/$SERVICE \
+                  --namespace staging \
+                  --set image.tag=$(IMAGE_TAG) \
+                  --set image.repository=$(ACR_NAME).azurecr.io/$SERVICE \
+                  --wait \
+                  --timeout 5m
+              done
+            displayName: 'Helm upgrade all services → staging'
+            workingDirectory: $(System.DefaultWorkingDirectory)
+
+          - script: |
+              kubectl get pods -n staging
+              kubectl get hpa -n staging
+            displayName: 'Verify staging deployment'
+
+# ─────────────────────────────────────────
+# STAGE 5 — DEPLOY TO PROD (manual approval)
+# ─────────────────────────────────────────
+- stage: DeployProd
+  displayName: 'Deploy to Production'
+  dependsOn: DeployStaging
+  condition: succeeded()
+  jobs:
+  - deployment: HelmDeployProd
+    displayName: 'Helm Deploy → Production'
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Get AKS credentials'
+            inputs:
+              azureSubscription: 'azure-connection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group $(AKS_RESOURCE_GROUP) \
+                  --name $(AKS_CLUSTER) \
+                  --overwrite-existing
+
+          - script: |
+              kubectl create namespace prod --dry-run=client -o yaml | kubectl apply -f -
+            displayName: 'Ensure prod namespace exists'
+
+          - script: |
+              for SERVICE in api-gateway auth-service data-service; do
+                helm upgrade --install $SERVICE ./helm/$SERVICE \
+                  --namespace prod \
+                  --set image.tag=$(IMAGE_TAG) \
+                  --set image.repository=$(ACR_NAME).azurecr.io/$SERVICE \
+                  --wait \
+                  --timeout 5m
+              done
+            displayName: 'Helm upgrade all services → prod'
+            workingDirectory: $(System.DefaultWorkingDirectory)
+
+          - script: |
+              kubectl get pods -n prod
+              kubectl get hpa -n prod
+            displayName: 'Verify production deployment'
+
+          - script: |
+              echo "Deployment complete at $(date)"
+              echo "Image tag: $(IMAGE_TAG)"
+              kubectl rollout status deployment/api-gateway -n prod
+              kubectl rollout status deployment/auth-service -n prod
+              kubectl rollout status deployment/data-service -n prod
+            displayName: 'Rollout status check'
