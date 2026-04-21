@@ -1,0 +1,28 @@
+// Query 1 - Pod status across all namespaces
+KubePodInventory
+| where TimeGenerated > ago(1h)
+| summarize count() by Namespace, PodStatus
+| order by Namespace asc
+
+// Query 2 - Container CPU usage
+Perf
+| where TimeGenerated > ago(1h)
+| where ObjectName == "K8SContainer"
+| where CounterName == "cpuUsageNanoCores"
+| summarize avg(CounterValue) by InstanceName, bin(TimeGenerated, 5m)
+| order by TimeGenerated desc
+
+// Query 3 - Container restarts
+KubePodInventory
+| where TimeGenerated > ago(24h)
+| where PodRestartCount > 0
+| project PodName, Namespace, PodRestartCount, TimeGenerated
+| order by PodRestartCount desc
+
+// Query 4 - Failed deployments
+KubeEvents
+| where TimeGenerated > ago(24h)
+| where Reason == "Failed" or Reason == "BackOff"
+| project TimeGenerated, Name, Namespace, Message
+| order by TimeGenerated desc
+
