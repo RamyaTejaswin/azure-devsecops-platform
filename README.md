@@ -61,7 +61,7 @@ build +        quality       vulnerability  approval       manual
 ACR push        gate            scan          gate         approval
 
 ### Pipeline Screenshots
-![Pipeline All Green](docs/screenshots/week4-pipeline-green.png)
+![Pipeline All Green](docs/screenshots/pipeline-success.png)
 
 ---
 
@@ -118,7 +118,7 @@ Each service has:
 - **Cost alerts** — budget alert at 80% of monthly limit
 
 ### Monitoring Dashboard
-![Azure Monitor Dashboard](docs/screenshots/week5-monitoring.png)
+![Azure Monitor Dashboard](docs/screenshots/week5-nodes.png)
 
 ---
 
