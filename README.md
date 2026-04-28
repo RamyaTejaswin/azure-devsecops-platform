@@ -166,7 +166,7 @@ helm install data-service ./helm/data-service --namespace dev
 ---
 
 ## Project Timeline
-**Oct 2024 – Apr 2025** | Self-directed DevOps upskilling project
+**Oct 2024 – Present** | Self-directed DevOps upskilling project
 
 ---
 
